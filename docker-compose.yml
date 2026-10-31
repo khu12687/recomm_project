@@ -1,0 +1,119 @@
+services:
+  postgres:
+    image: postgres:17
+
+    env_file: [".env"]
+
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+      POSTGRES_DB: "${POSTGRES_DB}"
+
+    ports:
+      - "127.0.0.1:${POSTGRES_EXTERNAL_PORT}:${POSTGRES_PORT}"
+
+    command: ["postgres", "-p", "${POSTGRES_PORT}"]
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p \"$${POSTGRES_PORT}\" -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+
+    env_file: [".env"]
+
+    ports:
+      - "127.0.0.1:${REDIS_EXTERNAL_PORT}:${REDIS_PORT}"
+
+    command: ["redis-server", "--port", "${REDIS_PORT}"]
+
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -p \"$${REDIS_PORT}\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+
+    env_file: [".env"]
+
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "${POSTGRES_PORT}"
+      REDIS_HOST: redis
+      REDIS_PORT: "${REDIS_PORT}"
+      BACKEND_PORT: "${BACKEND_PORT}"
+
+    volumes:
+      - type: bind
+        source: ./backend/checkpoint
+        target: /app/checkpoint
+        read_only: true
+        bind:
+          create_host_path: false
+
+      - type: bind
+        source: ./backend/app/data
+        target: /app/app/data
+        read_only: true
+        bind:
+          create_host_path: false
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ['BACKEND_PORT'] + '/health', timeout=5)"]
+      interval: 10s
+      timeout: 6s
+      retries: 15
+      start_period: 30s
+
+    restart: unless-stopped
+
+  nginx:
+    build:
+      context: .
+      dockerfile: nginx/Dockerfile
+
+    env_file: [".env"]
+
+    environment:
+      NGINX_ENVSUBST_FILTER: "^(NGINX_INTERNAL_PORT|BACKEND_PORT)$"
+
+    ports:
+      - "127.0.0.1:${NGINX_EXTERNAL_PORT}:${NGINX_INTERNAL_PORT}"
+
+    depends_on:
+      backend:
+        condition: service_healthy
+
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null \"http://127.0.0.1:$${NGINX_INTERNAL_PORT}/healthz\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    external: true
+    name: "${POSTGRES_VOLUME_NAME:?기존 PostgreSQL 볼륨 이름을 설정하세요}"
